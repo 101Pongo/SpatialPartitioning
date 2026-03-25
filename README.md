@@ -1,69 +1,64 @@
 # Spatial Partitioning
 
-A lightweight, deterministic spatial description system for Unity, built for procedural content generation.
+A lightweight spatial partitioning system for Unity, built for procedural content generation.
 
-## Why This Exists
+## Why I Built This
 
-I needed a way to describe 3D space that was cheap enough to run every frame, deterministic across sessions, and simple enough to drive downstream systems without becoming one itself. Most spatial partitioning libraries are built around runtime insertion and querying — you put objects in, you ask what's nearby. That's great for physics broadphase, but it's the wrong abstraction for procedural generation where the space itself is the data and the content doesn't exist yet.
+Most spatial partitioning libraries are designed around storing objects and querying them — you insert things, then ask "what's near this point?" That's useful for physics or AI, but it wasn't what I needed.
 
-This library doesn't store objects. It describes space: where regions are, how they subdivide, and what changed since last frame. Downstream systems subscribe to those changes and decide what to do — spawn terrain, generate buildings, place vegetation, whatever. The partitioning layer stays dumb and fast.
+I was working on procedural generation and needed something that could describe space itself. Not "what objects are here," but "what chunks of space exist around the player, and which ones just appeared or disappeared?" The idea was that downstream systems — terrain, buildings, vegetation, whatever — could listen for those changes and spawn content in response. The partitioning layer just figures out the spatial layout and stays out of the way.
 
-## Architecture
+I also needed it to be deterministic. Given the same position and settings, it should always produce the same result, on any machine. That ruled out floating-point coordinates for the spatial structure, so everything is integer-based.
 
-The hierarchy is three levels: **Domain → Region → Octant**.
+## How It Works
 
-**Region** is the fundamental unit — a fixed-size cubic cell on an integer grid, defined by its index. The default size is 1024 units (a power of two, chosen so octant subdivision always lands on integer boundaries). Regions are value types, hashable, comparable, and free to create — they're just three ints and some arithmetic.
+There are three main pieces: **Regions**, **Octants**, and the **AdaptiveOctree** that ties them together.
 
-**Domain** is a bounding box expressed as a range of regions. Given a min and max world position, it snaps to region boundaries and lets you iterate over every region inside. It's the "what part of the world are we looking at" query.
+**Regions** are the base grid. The world is divided into fixed-size cubic cells (1024 units by default), and each one is identified by an integer index — like tile coordinates, but in 3D. They're cheap to create and compare since they're just three ints under the hood.
 
-**Octant** is a node in an octree rooted at a region. Each region can subdivide recursively into octants, halving in size at each level. Octants are also value types — they're defined entirely by their min corner and size, so you can reconstruct any octant from those four ints without traversing a tree. Parent, child, sibling, and root lookups are all arithmetic, no pointer chasing.
+**Octants** subdivide a region. Each region can be split into eight smaller cubes, and those can split again, and so on. An octant is defined by its corner position and size — four ints total — so you can figure out its parent, children, or siblings with just math. There's no tree of linked nodes to walk through.
 
-**AdaptiveOctree** is the orchestrator. It takes a target position (typically the camera or player), builds a set of regions around it, and subdivides each region's octree based on distance thresholds — closer to the target means deeper subdivision. Then it diffs the result against the previous frame and exposes added/removed sets for both regions and octants. Downstream systems read those sets, react, and call `ClearDirty()` when they're done.
+**AdaptiveOctree** is the thing you actually call each frame. You give it a position (usually the player or camera), and it figures out which regions are nearby and how deeply to subdivide them. Regions close to the target get subdivided more, regions far away stay coarse. Then it compares the result to last frame and tells you what changed — which regions and octants were added or removed. Your other systems read those changes, do their thing, and call `ClearDirty()` when they're done.
 
-The adaptive octree is intentionally static. This was designed for a single-focus-point scenario (one camera, one player) where the entire system is a global service. If you needed multiple independent octrees, you'd refactor to instance-based — but for the procgen use case that motivated this, a static API kept the call sites clean.
+The octree is static (one global instance) because I only needed one focus point. If you needed multiple cameras or independent octrees, you'd refactor it to be instance-based, but for a single-player procgen scenario this kept things simple.
 
-## Design Decisions
+## Why It's Designed This Way
 
-**Integer coordinates everywhere.** Regions, octants, and domains all use `Vector3Int`. This eliminates floating-point drift, makes hashing exact, and means two systems evaluating the same position will always agree on which cell it belongs to. Determinism was non-negotiable — procedural generation that produces different results on different machines is a bug.
+**Integers everywhere.** Floating-point math can give slightly different results on different hardware. For procedural generation that's a problem — if two systems disagree about which cell a position belongs to, you get mismatched content. Integer coordinates eliminate that entirely.
 
-**Power-of-two sizing.** Region size is 1024, octant subdivision halves each level. This guarantees every boundary lands on an integer. It also means depth can be computed from size with a single log2, and child/parent relationships are just bit shifts conceptually.
+**Power-of-two sizes.** Regions are 1024 units, and octants halve each level. This means every subdivision boundary is always a whole number. It also makes the math clean — depth is just a log2 of the size ratio.
 
-**Value-type spatial primitives.** Region and Octant are `readonly struct` with proper `IEquatable<T>` and `GetHashCode`. They live in `HashSet<T>` for the diff tracking, so avoiding boxing and getting correct equality was critical. You can create millions of these per frame without GC pressure.
+**Value types.** Regions and Octants are structs, not classes. They go in HashSets for the change tracking, so they need to be fast to hash and compare, and they shouldn't create garbage collection pressure. You can create a lot of these per frame without worrying about it.
 
-**Dirty tracking, not events.** Instead of firing callbacks when regions change, the system accumulates added/removed sets that consumers poll. This avoids allocation from delegates, gives consumers control over when they process changes, and makes the update order explicit. It's a pull model — the spatial system doesn't know or care what's listening.
-
-**Distance-threshold subdivision.** The `Thresholds` array defines how far from the target each depth level extends. This gives you LOD-like behavior: dense subdivision near the camera, coarse far away. The thresholds are expressed in world units as multiples of `Region.Factor`, so they scale with your world size.
+**Pull-based change tracking.** Instead of firing events when things change, the system just builds up sets of what was added and removed. Consumers check those sets when they're ready. This avoids allocations from delegates and lets each system decide when to process updates.
 
 ## The Lattice
 
-`Lattice<T>` is a separate tool in the same package — a generic 3D grid with configurable non-uniform divisions. Where the octree describes space hierarchically, the lattice describes it as a flat grid of cells, each storing arbitrary data.
+There's also a `Lattice<T>` in here — a simple 3D grid where each cell stores whatever data type you want. It supports both uniform and non-uniform spacing between cells.
 
-The use case is different: you might use a lattice to define a building footprint, divide a room into zones, or store per-cell metadata for a chunk of terrain. It supports both uniform and non-uniform division spacing, world-space position lookups, and a `Resolve` method that lets you populate every cell based on its position.
+I kept building this alongside the octree because I kept needing "a box divided into a grid, where each cell holds some data." Things like defining zones within a building footprint, or storing per-cell metadata for a terrain chunk. It shares the same spatial conventions as the rest of the package.
 
-It's here because I kept needing "a 3D grid of T with world-space bounds" alongside the octree, and the two share the same spatial conventions.
+## What It's For
 
-## What This Is For
-
-- **Procedural world generation** — drive chunk loading, terrain generation, or structure placement from spatial changes
-- **LOD management** — use octant depth as a natural LOD signal
-- **Deterministic spatial queries** — given the same position and thresholds, the output is always identical
-- **Lightweight runtime budgets** — no allocations during steady-state updates, integer math only for spatial lookups
+- Driving procedural generation from spatial changes (chunks loading/unloading, terrain, structures)
+- LOD-like behavior using octant depth as a distance signal
+- Any scenario where you need deterministic, repeatable spatial queries
+- Lightweight enough to run every frame without allocations during steady state
 
 ## Structure
 
 ```
 Runtime/
   Public/
-    AdaptiveOctree.cs   — Static orchestrator, distance-based subdivision, dirty tracking
-    Region.cs           — Fixed-size grid cell, integer coordinates
-    Octant.cs           — Octree node, value type, arithmetic hierarchy traversal
-    Domain.cs           — Bounding box as a range of regions
-    Lattice.cs          — Generic 3D grid with non-uniform divisions
-    PowerOfTwo.cs       — Named constants for power-of-two values
-    Vector4Int.cs       — 4-component integer vector
+    AdaptiveOctree.cs   — The main system. Subdivides space around a target, tracks changes.
+    Region.cs           — A fixed-size grid cell on an integer grid.
+    Octant.cs           — A node in the octree. Just a corner + size, all math, no pointers.
+    Domain.cs           — A bounding box expressed as a range of regions.
+    Lattice.cs          — A generic 3D grid with configurable divisions.
+    PowerOfTwo.cs       — Named constants for power-of-two values.
+    Vector4Int.cs       — 4-component integer vector.
 ```
 
 ## Dependencies
 
-- Unity (uses `Vector3`, `Vector3Int`, `Bounds`, `Mathf`, `Gizmos`)
-- No third-party packages
+Unity only — no third-party packages.
