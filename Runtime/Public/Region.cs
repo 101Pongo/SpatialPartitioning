@@ -15,7 +15,7 @@ namespace Atlas.SpatialPartitioning.Runtime.Public {
 	/// </remarks>
 	public readonly struct Region : IEquatable<Region>, IFormattable, IComparable<Region> {
 		/// <summary>Edge length of every region. Must be a power of two.</summary>
-		public static int Factor = PowerOfTwo.P_1024;
+		public const int Factor = 1024;
 
 		/// <summary>Half of <see cref="Factor"/>.</summary>
 		public static int HalfFactor => Factor / 2;

@@ -12,13 +12,15 @@ I also needed it to be deterministic. Given the same position and settings, it s
 
 ## How It Works
 
-There are three main pieces: **Regions**, **Octants**, and the **AdaptiveOctree** that ties them together.
+There are four main pieces: **Regions**, **Domains**, **Octants**, and the **AdaptiveOctree** that ties them together.
 
 **Regions** are the base grid. The world is divided into fixed-size cubic cells (1024 units by default), and each one is identified by an integer index — like tile coordinates, but in 3D. They're cheap to create and compare since they're just three ints under the hood.
 
+**Domains** define an area of interest as a range of regions. You give it two world positions (or a bounding box) and it snaps to region boundaries and figures out which regions fall inside. This is how the system goes from "the player is at position X" to "here are all the regions we care about right now." Domains also handle containment and overlap checks, so you can ask things like "does this region fall inside this area?" or "do these two areas overlap?"
+
 **Octants** subdivide a region. Each region can be split into eight smaller cubes, and those can split again, and so on. An octant is defined by its corner position and size — four ints total — so you can figure out its parent, children, or siblings with just math. There's no tree of linked nodes to walk through.
 
-**AdaptiveOctree** is the thing you actually call each frame. You give it a position (usually the player or camera), and it figures out which regions are nearby and how deeply to subdivide them. Regions close to the target get subdivided more, regions far away stay coarse. Then it compares the result to last frame and tells you what changed — which regions and octants were added or removed. Your other systems read those changes, do their thing, and call `ClearDirty()` when they're done.
+**AdaptiveOctree** is the thing you actually call each frame. You give it a position (usually the player or camera), and it builds a domain around that position, then walks through each region in that domain and decides how deeply to subdivide it. Regions close to the target get subdivided more, regions far away stay coarse. Then it compares the result to last frame and tells you what changed — which regions and octants were added or removed. Your other systems read those changes, do their thing, and call `ClearDirty()` when they're done.
 
 The octree is static (one global instance) because I only needed one focus point. If you needed multiple cameras or independent octrees, you'd refactor it to be instance-based, but for a single-player procgen scenario this kept things simple.
 
@@ -28,7 +30,7 @@ The octree is static (one global instance) because I only needed one focus point
 
 **Power-of-two sizes.** Regions are 1024 units, and octants halve each level. This means every subdivision boundary is always a whole number. It also makes the math clean — depth is just a log2 of the size ratio.
 
-**Value types.** Regions and Octants are structs, not classes. They go in HashSets for the change tracking, so they need to be fast to hash and compare, and they shouldn't create garbage collection pressure. You can create a lot of these per frame without worrying about it.
+**Value types.** Regions, Octants, and Domains are all structs, not classes. They go in HashSets for the change tracking, so they need to be fast to hash and compare, and they shouldn't create garbage collection pressure. You can create a lot of these per frame without worrying about it.
 
 **Pull-based change tracking.** Instead of firing events when things change, the system just builds up sets of what was added and removed. Consumers check those sets when they're ready. This avoids allocations from delegates and lets each system decide when to process updates.
 
@@ -52,11 +54,9 @@ Runtime/
   Public/
     AdaptiveOctree.cs   — The main system. Subdivides space around a target, tracks changes.
     Region.cs           — A fixed-size grid cell on an integer grid.
+    Domain.cs           — A bounding box expressed as a range of regions. Area-of-interest queries.
     Octant.cs           — A node in the octree. Just a corner + size, all math, no pointers.
-    Domain.cs           — A bounding box expressed as a range of regions.
     Lattice.cs          — A generic 3D grid with configurable divisions.
-    PowerOfTwo.cs       — Named constants for power-of-two values.
-    Vector4Int.cs       — 4-component integer vector.
 ```
 
 ## Dependencies
